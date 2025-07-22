@@ -35,12 +35,6 @@
 
         <!-- Vue.js コンポーネント -->
         <div id="atsu-search-app">
-            <!-- テストコンポーネント -->
-            <test-component 
-                api-key="{{ config('services.google_maps.api_key', 'demo-key') }}"
-                :is-logged-in="{{ auth()->check() ? 'true' : 'false' }}"
-            ></test-component>
-            
             <!-- メインコンポーネント -->
             <atsu-search-map 
                 api-key="{{ config('services.google_maps.api_key', 'demo-key') }}"

@@ -24,6 +24,7 @@ Route::prefix('locations')->group(function () {
     Route::post('/', [LocationController::class, 'store']);
     Route::get('/{id}', [LocationController::class, 'show']);
     Route::post('/reverse-geocode', [LocationController::class, 'reverseGeocode']);
+    Route::post('/temperature', [LocationController::class, 'getTemperature']);
     
     // ログイン必須
     Route::middleware('auth:sanctum')->group(function () {

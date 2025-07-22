@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Models\Location;
 use App\Services\WbgtDataService;
+use App\Services\JmaDataService;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Support\Facades\Validator;
@@ -11,7 +12,8 @@ use Illuminate\Support\Facades\Validator;
 class LocationController extends Controller
 {
     public function __construct(
-        private WbgtDataService $wbgtService
+        private WbgtDataService $wbgtService,
+        private JmaDataService $jmaService
     ) {}
 
     /**
@@ -191,19 +193,80 @@ class LocationController extends Controller
         }
 
         try {
-            // モックデータを返す（実際にはGoogle Maps APIを使用）
             $latitude = $request->get('latitude');
             $longitude = $request->get('longitude');
+            
+            // 最寄りのアメダス観測地点を取得
+            $nearestStation = $this->jmaService->getNearestStation($latitude, $longitude);
+            
+            // 気温データを取得
+            $temperatureData = null;
+            if ($nearestStation) {
+                $temperatureData = $this->jmaService->getTemperatureData($nearestStation['id']);
+            }
             
             return response()->json([
                 'name' => "緯度{$latitude}, 経度{$longitude}",
                 'address' => "緯度: {$latitude}, 経度: {$longitude}",
                 'latitude' => $latitude,
-                'longitude' => $longitude
+                'longitude' => $longitude,
+                'nearest_station' => $nearestStation,
+                'temperature_data' => $temperatureData
             ]);
         } catch (\Exception $e) {
             return response()->json([
                 'message' => 'Reverse geocoding failed',
+                'error' => $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * 指定地点の気温データを取得
+     */
+    public function getTemperature(Request $request): JsonResponse
+    {
+        $validator = Validator::make($request->all(), [
+            'latitude' => 'required|numeric|between:-90,90',
+            'longitude' => 'required|numeric|between:-180,180'
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'message' => 'Validation failed',
+                'errors' => $validator->errors()
+            ], 422);
+        }
+
+        try {
+            $latitude = $request->get('latitude');
+            $longitude = $request->get('longitude');
+            
+            // 最寄りのアメダス観測地点を取得
+            $nearestStation = $this->jmaService->getNearestStation($latitude, $longitude);
+            
+            if (!$nearestStation) {
+                return response()->json([
+                    'message' => '最寄りの観測地点が見つかりませんでした',
+                    'temperature_data' => null
+                ]);
+            }
+            
+            // 気温データを取得
+            $temperatureData = $this->jmaService->getTemperatureData($nearestStation['id']);
+            
+            return response()->json([
+                'station' => $nearestStation,
+                'temperature_data' => $temperatureData,
+                'location' => [
+                    'latitude' => $latitude,
+                    'longitude' => $longitude
+                ]
+            ]);
+            
+        } catch (\Exception $e) {
+            return response()->json([
+                'message' => '気温データの取得に失敗しました',
                 'error' => $e->getMessage()
             ], 500);
         }

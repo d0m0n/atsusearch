@@ -61,7 +61,7 @@
           <div class="wbgt-display">
             <div
               v-if="location.current_wbgt"
-              :style="{ backgroundColor: location.wbgt_level_color }"
+              :style="{ backgroundColor: location.wbgt_level_color || getWbgtLevelColor(location.current_wbgt) }"
               class="inline-block px-3 py-1 rounded-full text-white font-bold text-sm mb-2"
             >
               WBGT: {{ location.current_wbgt }}°C
@@ -71,9 +71,28 @@
               WBGT: データなし
             </div>
             
-            <p class="text-xs text-gray-600">
+            <!-- 気温情報の表示 -->
+            <div v-if="location.temperature_data" class="mt-2">
+              <div class="inline-block px-3 py-1 rounded-full bg-blue-100 text-blue-800 text-sm">
+                気温: {{ location.temperature_data.temperature }}°C
+              </div>
+              <div class="text-xs text-gray-500 mt-1">
+                観測地点: {{ location.nearest_station?.name }}
+                <span v-if="location.nearest_station?.distance">({{ location.nearest_station.distance }}km)</span>
+              </div>
+            </div>
+            
+            <p class="text-xs text-gray-600 mt-1">
               {{ location.wbgt_level_text || 'データ取得中...' }}
             </p>
+            
+            <!-- 情報源の表示 -->
+            <div class="text-xs text-gray-400 mt-2 border-t pt-2">
+              <div>WBGT: 環境省熱中症予防情報サイト</div>
+              <div v-if="location.temperature_data">
+                気温: <a href="https://www.data.jma.go.jp/stats/data/mdrr/index.html" target="_blank" class="text-blue-500 hover:underline">気象庁</a>
+              </div>
+            </div>
           </div>
           
           <div class="mt-3 flex space-x-2">
@@ -121,7 +140,7 @@
           <div>
             <p class="text-sm text-gray-600">現在のWBGT</p>
             <div
-              :style="{ backgroundColor: detailLocation.wbgt_level_color }"
+              :style="{ backgroundColor: detailLocation.wbgt_level_color || getWbgtLevelColor(detailLocation.current_wbgt) }"
               class="inline-block px-3 py-2 rounded text-white font-bold"
             >
               {{ detailLocation.current_wbgt }}°C
@@ -130,7 +149,27 @@
           
           <div>
             <p class="text-sm text-gray-600">警戒レベル</p>
-            <p class="font-medium">{{ detailLocation.wbgt_level_text }}</p>
+            <p class="font-medium">{{ detailLocation.wbgt_level_text || getWbgtLevelText(detailLocation.current_wbgt) }}</p>
+          </div>
+          
+          <div v-if="detailLocation.temperature_data">
+            <p class="text-sm text-gray-600">気温</p>
+            <div class="flex items-center space-x-2">
+              <span class="font-bold text-lg">{{ detailLocation.temperature_data.temperature }}°C</span>
+              <span class="text-sm text-gray-500">
+                ({{ detailLocation.nearest_station?.name }}観測所)
+              </span>
+            </div>
+          </div>
+          
+          <div class="bg-gray-50 p-3 rounded">
+            <p class="text-sm text-gray-600 mb-2">データ提供元</p>
+            <div class="space-y-1 text-xs text-gray-500">
+              <div>WBGT: 環境省熱中症予防情報サイト</div>
+              <div v-if="detailLocation.temperature_data">
+                気温: <a href="https://www.data.jma.go.jp/stats/data/mdrr/index.html" target="_blank" class="text-blue-500 hover:underline">気象庁</a>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -139,13 +178,18 @@
 </template>
 
 <script setup>
-import { ref, onMounted, inject } from 'vue'
+import { ref, onMounted } from 'vue'
 import axios from 'axios'
 
-console.log('AtsuSearchMap.vue - Script setup loading')
+console.log('🔥 AtsuSearchMap.vue - Script setup executed!')
+console.log('Vue imports loaded successfully')
+console.log('Axios loaded:', axios ? 'OK' : 'Failed')
 
 const props = defineProps({
-  apiKey: String,
+  apiKey: {
+    type: String,
+    required: true
+  },
   isLoggedIn: {
     type: Boolean,
     default: false
@@ -153,6 +197,10 @@ const props = defineProps({
 })
 
 console.log('AtsuSearchMap.vue - Props defined:', props)
+console.log('AtsuSearchMap.vue - Props values:', {
+  apiKey: props.apiKey ? props.apiKey.substring(0, 20) + '...' : 'Missing',
+  isLoggedIn: props.isLoggedIn
+})
 
 const map = ref(null)
 const selectedLocations = ref([])
@@ -163,12 +211,21 @@ const showDetails = ref(false)
 const detailLocation = ref({})
 
 const initMap = () => {
+  console.log('🗺️ Initializing Google Maps...')
+  
   if (!window.google) {
     console.error('Google Maps API not loaded')
     return
   }
 
-  map.value = new window.google.maps.Map(document.getElementById('map'), {
+  const mapElement = document.getElementById('map')
+  if (!mapElement) {
+    console.error('Map DOM element not found!')
+    return
+  }
+
+  console.log('Creating Google Maps instance...')
+  map.value = new window.google.maps.Map(mapElement, {
     center: { lat: 35.6812, lng: 139.7671 }, // 東京駅
     zoom: 10,
     styles: [
@@ -180,14 +237,18 @@ const initMap = () => {
     ]
   })
 
+  console.log('Google Maps instance created:', map.value)
+
   // 地図クリックイベント
   map.value.addListener('click', async (event) => {
+    console.log('🗺️ Map clicked!')
     if (event.latLng) {
       await addLocationMarker(event.latLng)
     }
   })
   
   mapLoaded.value = true
+  console.log('🗺️ Google Maps initialization completed!')
 }
 
 const addLocationMarker = async (latLng) => {
@@ -195,63 +256,100 @@ const addLocationMarker = async (latLng) => {
     const latitude = latLng.lat()
     const longitude = latLng.lng()
     
-    // 近隣の地点を検索
-    const response = await axios.get('/api/wbgt/nearby', {
-      params: { latitude, longitude, radius: 50 }
+    // 逆ジオコーディングで地点情報を取得（気温データも含む）
+    const reverseResponse = await axios.post('/api/locations/reverse-geocode', {
+      latitude,
+      longitude
     })
     
-    if (response.data.locations.length > 0) {
-      // 既存の地点が見つかった場合
-      const location = response.data.locations[0]
-      addOrUpdateLocation(location)
-      
-      // マーカーを追加
-      const marker = new window.google.maps.Marker({
-        position: { lat: parseFloat(location.latitude), lng: parseFloat(location.longitude) },
-        map: map.value,
-        title: location.name,
-        icon: getMarkerIcon(location.wbgt_level)
-      })
-      
-    } else {
-      // 新しい地点を作成
-      const locationResponse = await axios.post('/api/locations', {
-        latitude,
-        longitude
-      })
-      
-      const newLocation = locationResponse.data.location
-      
-      // WBGTデータを取得
+    const locationData = reverseResponse.data
+    
+    // 地点を作成
+    const locationResponse = await axios.post('/api/locations', {
+      name: locationData.name,
+      address: locationData.address,
+      latitude,
+      longitude
+    })
+    
+    const newLocation = locationResponse.data.location
+    
+    // WBGTデータを取得
+    try {
+      console.log('🌡️ Fetching WBGT data for location ID:', newLocation.id)
       const wbgtResponse = await axios.get(`/api/wbgt/${newLocation.id}`, {
         params: { type: dataType.value }
       })
       
+      console.log('🌡️ WBGT API response:', wbgtResponse.data)
+      
       // 現在のWBGTデータを設定
-      if (wbgtResponse.data.wbgt_data.length > 0) {
+      if (wbgtResponse.data.wbgt_data && wbgtResponse.data.wbgt_data.length > 0) {
         const currentHour = new Date().getHours()
         const currentData = wbgtResponse.data.wbgt_data.find(data => data.hour <= currentHour) || wbgtResponse.data.wbgt_data[0]
         
-        newLocation.current_wbgt = currentData.wbgt_value
-        newLocation.wbgt_level = currentData.wbgt_level
-        newLocation.wbgt_level_text = currentData.wbgt_level_text
-        newLocation.wbgt_level_color = currentData.wbgt_level_color
+        console.log('✅ WBGT data found:', currentData)
+        
+        const wbgtValue = parseFloat(currentData.wbgt_value)
+        
+        newLocation.current_wbgt = wbgtValue
+        newLocation.wbgt_level = getWbgtLevel(wbgtValue)
+        newLocation.wbgt_level_text = getWbgtLevelText(wbgtValue)
+        newLocation.wbgt_level_color = getWbgtLevelColor(wbgtValue)
+        
+        console.log('✅ WBGT processed:', {
+          value: wbgtValue,
+          level: newLocation.wbgt_level,
+          text: newLocation.wbgt_level_text,
+          color: newLocation.wbgt_level_color
+        })
+      } else {
+        console.warn('⚠️ No WBGT data found in response')
       }
-      
-      addOrUpdateLocation(newLocation)
-      
-      // マーカーを追加
-      const marker = new window.google.maps.Marker({
-        position: latLng,
-        map: map.value,
-        title: newLocation.name,
-        icon: getMarkerIcon(newLocation.wbgt_level)
-      })
+    } catch (wbgtError) {
+      console.warn('WBGT data fetch failed:', wbgtError)
+      console.warn('Error details:', wbgtError.response?.data)
     }
+    
+    // 気温データを取得
+    try {
+      console.log('🌡️ Fetching temperature data for:', latitude, longitude)
+      const tempResponse = await axios.post('/api/locations/temperature', {
+        latitude,
+        longitude
+      })
+      
+      console.log('🌡️ Temperature API response:', tempResponse.data)
+      console.log('🌡️ Response keys:', Object.keys(tempResponse.data))
+      console.log('🌡️ Station data:', tempResponse.data.station)
+      console.log('🌡️ Temperature data:', tempResponse.data.temperature_data)
+      
+      if (tempResponse.data.temperature_data) {
+        newLocation.temperature_data = tempResponse.data.temperature_data
+        newLocation.nearest_station = tempResponse.data.station
+        console.log('✅ Temperature data added:', tempResponse.data.temperature_data)
+      } else {
+        console.warn('⚠️ No temperature data received')
+        console.warn('⚠️ Full response:', tempResponse.data)
+      }
+    } catch (tempError) {
+      console.warn('Temperature data fetch failed:', tempError)
+      console.warn('Error details:', tempError.response?.data)
+    }
+    
+    addOrUpdateLocation(newLocation)
+    
+    // マーカーを追加
+    new window.google.maps.Marker({
+      position: latLng,
+      map: map.value,
+      title: newLocation.name,
+      icon: getMarkerIcon(newLocation.wbgt_level || 'safe')
+    })
     
   } catch (error) {
     console.error('地点追加エラー:', error)
-    alert('地点の追加に失敗しました')
+    alert('地点の追加に失敗しました: ' + (error.response?.data?.message || error.message))
   }
 }
 
@@ -263,6 +361,30 @@ const addOrUpdateLocation = (location) => {
   } else {
     selectedLocations.value.push(location)
   }
+}
+
+const getWbgtLevel = (wbgt) => {
+  if (wbgt >= 31) return 'danger'
+  if (wbgt >= 28) return 'severe_warning'
+  if (wbgt >= 25) return 'warning'
+  if (wbgt >= 21) return 'caution'
+  return 'safe'
+}
+
+const getWbgtLevelText = (wbgt) => {
+  if (wbgt >= 31) return '危険：運動は原則中止'
+  if (wbgt >= 28) return '厳重警戒：激しい運動は中止'
+  if (wbgt >= 25) return '警戒：積極的に休憩'
+  if (wbgt >= 21) return '注意：水分補給を忘れずに'
+  return 'ほぼ安全'
+}
+
+const getWbgtLevelColor = (wbgt) => {
+  if (wbgt >= 31) return '#dc2626'      // 危険（赤）
+  if (wbgt >= 28) return '#f97316'      // 厳重警戒（オレンジ）
+  if (wbgt >= 25) return '#eab308'      // 警戒（黄）
+  if (wbgt >= 21) return '#3b82f6'      // 注意（青）
+  return '#16a34a'                      // ほぼ安全（緑）
 }
 
 const getMarkerIcon = (wbgtLevel) => {
@@ -356,7 +478,13 @@ const closeDetails = () => {
 }
 
 onMounted(() => {
-  console.log('AtsuSearchMap mounted with API key:', props.apiKey)
+  console.log('🗺️ AtsuSearchMap.vue mounted!')
+  console.log('Props received:', props)
+  console.log('API Key:', props.apiKey ? props.apiKey.substring(0, 20) + '...' : 'Missing')
+  
+  // DOM要素の確認
+  const mapElement = document.getElementById('map')
+  console.log('Map DOM element:', mapElement)
   
   // Google Maps APIの読み込み
   if (window.google && window.google.maps) {
