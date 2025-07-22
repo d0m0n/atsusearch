@@ -47,13 +47,22 @@
         >
           <div class="flex justify-between items-start mb-2">
             <h3 class="font-bold text-lg text-gray-800">{{ location.name }}</h3>
-            <button
-              @click="toggleFavorite(location)"
-              :class="location.is_favorite ? 'text-red-500' : 'text-gray-400'"
-              class="text-xl hover:scale-110 transition-transform"
-            >
-              {{ location.is_favorite ? '❤️' : '🤍' }}
-            </button>
+            <div class="flex items-center space-x-2">
+              <button
+                @click="toggleFavorite(location)"
+                :class="location.is_favorite ? 'text-red-500' : 'text-gray-400'"
+                class="text-xl hover:scale-110 transition-transform"
+              >
+                {{ location.is_favorite ? '❤️' : '🤍' }}
+              </button>
+              <button
+                @click="removeLocation(location)"
+                class="w-6 h-6 flex items-center justify-center rounded-full text-gray-400 hover:text-red-500 hover:bg-red-50 text-lg font-bold hover:scale-110 transition-all"
+                title="地点を削除"
+              >
+                ×
+              </button>
+            </div>
           </div>
           
           <p class="text-sm text-gray-600 mb-3">{{ location.address }}</p>
@@ -71,13 +80,21 @@
               WBGT: データなし
             </div>
             
+            <!-- WBGT観測地点情報の表示 -->
+            <div v-if="location.wbgt_station && location.current_wbgt" class="mt-1">
+              <div class="text-xs text-gray-500">
+                WBGT観測地点: {{ location.wbgt_station.name }}
+                <span v-if="location.wbgt_station.distance">({{ location.wbgt_station.distance }}km)</span>
+              </div>
+            </div>
+            
             <!-- 気温情報の表示 -->
             <div v-if="location.temperature_data" class="mt-2">
               <div class="inline-block px-3 py-1 rounded-full bg-blue-100 text-blue-800 text-sm">
                 気温: {{ location.temperature_data.temperature }}°C
               </div>
               <div class="text-xs text-gray-500 mt-1">
-                観測地点: {{ location.nearest_station?.name }}
+                気温観測地点: {{ location.nearest_station?.name }}
                 <span v-if="location.nearest_station?.distance">({{ location.nearest_station.distance }}km)</span>
               </div>
             </div>
@@ -88,7 +105,7 @@
             
             <!-- 情報源の表示 -->
             <div class="text-xs text-gray-400 mt-2 border-t pt-2">
-              <div>WBGT: 環境省熱中症予防情報サイト</div>
+              <div>WBGT: <a href="https://www.wbgt.env.go.jp/" target="_blank" class="text-blue-500 hover:underline">環境省</a></div>
               <div v-if="location.temperature_data">
                 気温: <a href="https://www.data.jma.go.jp/stats/data/mdrr/index.html" target="_blank" class="text-blue-500 hover:underline">気象庁</a>
               </div>
@@ -152,6 +169,16 @@
             <p class="font-medium">{{ detailLocation.wbgt_level_text || getWbgtLevelText(detailLocation.current_wbgt) }}</p>
           </div>
           
+          <div v-if="detailLocation.wbgt_station && detailLocation.current_wbgt">
+            <p class="text-sm text-gray-600">WBGT観測地点</p>
+            <div class="flex items-center space-x-2">
+              <span class="font-medium">{{ detailLocation.wbgt_station.name }}</span>
+              <span class="text-sm text-gray-500">
+                ({{ detailLocation.wbgt_station.distance }}km)
+              </span>
+            </div>
+          </div>
+          
           <div v-if="detailLocation.temperature_data">
             <p class="text-sm text-gray-600">気温</p>
             <div class="flex items-center space-x-2">
@@ -165,7 +192,7 @@
           <div class="bg-gray-50 p-3 rounded">
             <p class="text-sm text-gray-600 mb-2">データ提供元</p>
             <div class="space-y-1 text-xs text-gray-500">
-              <div>WBGT: 環境省熱中症予防情報サイト</div>
+              <div>WBGT: <a href="https://www.wbgt.env.go.jp/" target="_blank" class="text-blue-500 hover:underline">環境省</a></div>
               <div v-if="detailLocation.temperature_data">
                 気温: <a href="https://www.data.jma.go.jp/stats/data/mdrr/index.html" target="_blank" class="text-blue-500 hover:underline">気象庁</a>
               </div>
@@ -209,6 +236,7 @@ const dataType = ref('forecast')
 const mapLoaded = ref(false)
 const showDetails = ref(false)
 const detailLocation = ref({})
+const locationMarkers = ref(new Map()) // 地点IDとマーカーのマッピング
 
 const initMap = () => {
   console.log('🗺️ Initializing Google Maps...')
@@ -297,6 +325,11 @@ const addLocationMarker = async (latLng) => {
         newLocation.wbgt_level_text = getWbgtLevelText(wbgtValue)
         newLocation.wbgt_level_color = getWbgtLevelColor(wbgtValue)
         
+        // WBGT観測地点情報を追加
+        if (wbgtResponse.data.wbgt_station) {
+          newLocation.wbgt_station = wbgtResponse.data.wbgt_station
+        }
+        
         console.log('✅ WBGT processed:', {
           value: wbgtValue,
           level: newLocation.wbgt_level,
@@ -340,12 +373,15 @@ const addLocationMarker = async (latLng) => {
     addOrUpdateLocation(newLocation)
     
     // マーカーを追加
-    new window.google.maps.Marker({
+    const marker = new window.google.maps.Marker({
       position: latLng,
       map: map.value,
       title: newLocation.name,
       icon: getMarkerIcon(newLocation.wbgt_level || 'safe')
     })
+    
+    // マーカーをマッピングに保存
+    locationMarkers.value.set(newLocation.id, marker)
     
   } catch (error) {
     console.error('地点追加エラー:', error)
@@ -357,9 +393,11 @@ const addOrUpdateLocation = (location) => {
   const existingIndex = selectedLocations.value.findIndex(loc => loc.id === location.id)
   
   if (existingIndex >= 0) {
+    // 既存の地点を更新
     selectedLocations.value[existingIndex] = location
   } else {
-    selectedLocations.value.push(location)
+    // 新しい地点を配列の先頭に追加（上に表示）
+    selectedLocations.value.unshift(location)
   }
 }
 
@@ -475,6 +513,28 @@ const viewDetails = (location) => {
 
 const closeDetails = () => {
   showDetails.value = false
+}
+
+const removeLocation = (locationToRemove) => {
+  const index = selectedLocations.value.findIndex(loc => loc.id === locationToRemove.id)
+  if (index > -1) {
+    // 地点リストから削除
+    selectedLocations.value.splice(index, 1)
+    
+    // 対応するマーカーを地図から削除
+    const marker = locationMarkers.value.get(locationToRemove.id)
+    if (marker) {
+      marker.setMap(null) // マーカーを地図から削除
+      locationMarkers.value.delete(locationToRemove.id) // マッピングからも削除
+    }
+    
+    // 詳細モーダルが開いている場合は閉じる
+    if (showDetails.value && detailLocation.value.id === locationToRemove.id) {
+      showDetails.value = false
+    }
+    
+    console.log('✅ Location and marker removed:', locationToRemove.name)
+  }
 }
 
 onMounted(() => {

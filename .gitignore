@@ -22,7 +22,6 @@
 Homestead.json
 Homestead.yaml
 Thumbs.db
-resources/js/search.js
 
 # AtsuSearch specific
 /public/assets/build/

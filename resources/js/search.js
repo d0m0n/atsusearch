@@ -31,8 +31,15 @@ function initializeVueApp() {
 
   // Bladeテンプレートからpropsを抽出
   const mapElement = mountElement.querySelector('atsu-search-map')
-  const apiKey = mapElement?.getAttribute('api-key') || 'AIzaSyDQrPePZ7hq3lOlqx3WWUqU7aQq3iqw3g8'
+  const apiKey = mapElement?.getAttribute('api-key') || import.meta.env.VITE_GOOGLE_MAPS_API_KEY || ''
   const isLoggedIn = mapElement?.getAttribute(':is-logged-in') === 'true'
+  
+  // APIキーが設定されていない場合の警告
+  if (!apiKey) {
+    console.error('⚠️ Google Maps API key is not configured!')
+    console.error('Please set GOOGLE_MAPS_API_KEY in your .env file')
+    return
+  }
   
   console.log('Props extracted from Blade:', { 
     apiKey: apiKey.substring(0, 20) + '...', 
