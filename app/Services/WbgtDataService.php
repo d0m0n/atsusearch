@@ -4,440 +4,307 @@ namespace App\Services;
 
 use App\Models\Location;
 use App\Models\WbgtData;
-use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
+/**
+ * 環境省WBGTデータの取得・保存・照会を担うサービス。
+ *
+ * CSV取得・解析は WbgtCsvParser に委譲。
+ * 最寄り観測地点の特定は NearestStationService に委譲。
+ */
 class WbgtDataService
 {
-    private const CACHE_TTL = 3600; // 1時間
-    private const WBGT_BASE_URL = 'https://www.wbgt.env.go.jp/mntr';
+    private const CACHE_KEY_LAST_UPDATE = 'wbgt_last_update';
+    private const CACHE_TTL_SECONDS     = 3600; // 1時間
+    private const UPDATE_INTERVAL_MIN   = 60;   // 最小更新間隔（分）
 
+    /** 環境省WBGT CSV基底URL（実況値） */
+    private string $baseUrl;
+
+    /** 環境省WBGT 予測値CSV基底URL */
+    private string $forecastUrl;
+
+    public function __construct(
+        private readonly WbgtCsvParser        $csvParser,
+        private readonly NearestStationService $nearestStationService
+    ) {
+        $this->baseUrl     = config('services.wbgt.base_url',     'https://www.wbgt.env.go.jp/prev15WG/dl/');
+        $this->forecastUrl = config('services.wbgt.forecast_url', 'https://www.wbgt.env.go.jp/prev15WG/dl/');
+    }
+
+    // =========================================================
+    // 公開API
+    // =========================================================
+
+    /**
+     * 環境省からWBGTデータを取得してDBに保存する。
+     * 最終更新から CACHE_TTL_SECONDS 以内はスキップ（--force で上書き可）。
+     */
     public function fetchAndStoreWbgtData(): void
     {
-        $cacheKey = 'wbgt_last_update';
-        $lastUpdate = Cache::get($cacheKey);
-        
-        if ($lastUpdate && now()->diffInMinutes($lastUpdate) < 60) {
-            Log::info('WBGT data update skipped - recent update found');
+        $lastUpdate = Cache::get(self::CACHE_KEY_LAST_UPDATE);
+
+        if ($lastUpdate && now()->diffInMinutes($lastUpdate) < self::UPDATE_INTERVAL_MIN) {
+            Log::info('WbgtDataService: skipping update (within interval)');
             return;
         }
 
         try {
-            // 環境省の公式CSV データを取得
-            $this->fetchRealWbgtData();
-            
-            Cache::put($cacheKey, now(), self::CACHE_TTL);
-            Log::info('WBGT data updated successfully from Environment Ministry');
+            $this->fetchForecastCsv();
+            Cache::put(self::CACHE_KEY_LAST_UPDATE, now(), self::CACHE_TTL_SECONDS);
+            Log::info('WbgtDataService: WBGT data updated successfully');
         } catch (\Exception $e) {
-            Log::error('WBGT data update failed: ' . $e->getMessage());
-            // フォールバックとしてサンプルデータを使用
+            Log::error('WbgtDataService: fetch failed — ' . $e->getMessage());
+            // フォールバック: サンプルデータで主要都市を補完
             $this->generateSampleWbgtData();
-            Log::info('Using sample WBGT data as fallback');
+            Log::info('WbgtDataService: using sample WBGT data as fallback');
         }
     }
 
     /**
-     * 環境省の公式WBGTデータを取得
+     * 指定 location_id のWBGTデータを返す。
+     *
+     * @return array{location: Location, date: string, type: string, wbgt_data: \Illuminate\Database\Eloquent\Collection, wbgt_station: array|null}
      */
-    private function fetchRealWbgtData(): void
+    public function getLocationWbgt(int $locationId, ?string $date = null, string $type = 'forecast'): array
     {
-        $currentMonth = now()->format('Ym');
-        $stations = $this->getOfficialWbgtStationIds();
-        
-        foreach ($stations as $stationData) {
-            try {
-                $csvData = $this->fetchStationCsvData($stationData['station_name'], $currentMonth);
-                if ($csvData) {
-                    $this->processWbgtCsvData($csvData, $stationData);
-                }
-            } catch (\Exception $e) {
-                Log::warning("Failed to fetch WBGT data for station {$stationData['station_name']}: " . $e->getMessage());
-                continue;
-            }
+        $location   = Location::findOrFail($locationId);
+        $targetDate = $date ? \Carbon\Carbon::parse($date) : now('Asia/Tokyo');
+        $currentHour = now('Asia/Tokyo')->hour;
+
+        $wbgtData = WbgtData::where('location_id', $locationId)
+            ->where('date', $targetDate->toDateString())
+            ->when($type === 'actual', fn ($q) =>
+                $q->where('data_type', 'actual')->where('hour', '<=', $currentHour)->orderBy('hour', 'desc')
+            )
+            ->when($type === 'forecast', fn ($q) =>
+                $q->where(fn ($inner) =>
+                    $inner->where('data_type', 'actual')->where('hour', '<=', $currentHour)
+                )->orWhere(fn ($inner) =>
+                    $inner->where('data_type', 'forecast')->where('hour', '>', $currentHour)
+                )
+            )
+            ->orderBy('hour')
+            ->get();
+
+        // データが古い or 空の場合は更新を試みる
+        $latestData = $wbgtData->sortByDesc('hour')->first();
+        if (!$latestData || $latestData->updated_at->lt(now()->subHours(3))) {
+            Log::info("WbgtDataService: data stale for location {$locationId}, refreshing");
+            $this->fetchAndStoreWbgtData();
+            $wbgtData = WbgtData::where('location_id', $locationId)
+                ->where('date', $targetDate->toDateString())
+                ->orderBy('hour')
+                ->get();
         }
-    }
-    
-    /**
-     * 環境省の観測地点名（dlパス用）とアプリ内地点のマッピング
-     */
-    private function getOfficialWbgtStationIds(): array
-    {
+
+        $wbgtStation = $this->nearestStationService->findNearest($location->latitude, $location->longitude);
+
         return [
-            // 環境省のCSVファイル名に基づく（実際にアクセス可能な地点）
-            ['station_name' => 'Utsunomiya', 'location_name' => '宇都宮', 'lat' => 36.566, 'lon' => 139.883],
-            ['station_name' => 'Tokyo', 'location_name' => '東京', 'lat' => 35.681, 'lon' => 139.767],
-            ['station_name' => 'Osaka', 'location_name' => '大阪', 'lat' => 34.686, 'lon' => 135.520],
-            ['station_name' => 'Nagoya', 'location_name' => '名古屋', 'lat' => 35.181, 'lon' => 136.907],
-            ['station_name' => 'Fukuoka', 'location_name' => '福岡', 'lat' => 33.606, 'lon' => 130.418],
-            ['station_name' => 'Sendai', 'location_name' => '仙台', 'lat' => 38.268, 'lon' => 140.872],
-            ['station_name' => 'Sapporo', 'location_name' => '札幌', 'lat' => 43.064, 'lon' => 141.347],
-            ['station_name' => 'Hiroshima', 'location_name' => '広島', 'lat' => 34.397, 'lon' => 132.460],
-            ['station_name' => 'Shizuoka', 'location_name' => '静岡', 'lat' => 34.976, 'lon' => 138.383],
-            ['station_name' => 'Kumamoto', 'location_name' => '熊本', 'lat' => 32.790, 'lon' => 130.742],
+            'location'     => $location,
+            'date'         => $targetDate->toDateString(),
+            'type'         => $type,
+            'wbgt_data'    => $wbgtData,
+            'wbgt_station' => $wbgtStation,
         ];
     }
-    
+
     /**
-     * 特定観測地点のCSVデータを取得
+     * 近隣の Location を返す（半径 km 以内）。
      */
-    private function fetchStationCsvData(string $stationName, string $yearMonth): ?string
+    public function searchLocationsByCoordinates(float $latitude, float $longitude, int $radius = 50): \Illuminate\Database\Eloquent\Collection
     {
-        $url = self::WBGT_BASE_URL . "/dl/{$stationName}_{$yearMonth}.csv";
-        
-        try {
-            Log::info("Fetching WBGT CSV from: {$url}");
-            $response = Http::timeout(30)->get($url);
-            
-            if (!$response->successful()) {
-                Log::warning("Failed to fetch WBGT CSV from {$url}: " . $response->status());
-                return null;
-            }
-            
-            return $response->body();
-        } catch (\Exception $e) {
-            Log::error("Error fetching WBGT CSV from {$url}: " . $e->getMessage());
-            return null;
-        }
+        return Location::findNearby($latitude, $longitude, $radius);
     }
-    
+
     /**
-     * 環境省CSVデータを処理してデータベースに保存
+     * 座標から Location を作成してサンプルWBGTデータを付与する。
      */
-    private function processWbgtCsvData(string $csvData, array $stationData): void
+    public function createLocationFromCoordinates(float $latitude, float $longitude, ?int $userId = null): Location
     {
-        $lines = explode("\n", trim($csvData));
-        
-        // ヘッダー行をスキップ（CSV形式によって調整が必要）
-        if (count($lines) > 1) {
-            array_shift($lines);
-        }
-        
-        // 対応するLocationレコードを取得または作成
-        $location = Location::firstOrCreate([
-            'name' => $stationData['location_name'],
-            'latitude' => $stationData['lat'],
-            'longitude' => $stationData['lon']
-        ], [
-            'address' => $stationData['location_name'],
-            'prefecture_code' => $this->getPrefectureCode($stationData['location_name']),
-            'user_id' => null
+        $location = Location::create([
+            'name'            => "地点_" . substr(md5($latitude . $longitude), 0, 6),
+            'address'         => "緯度: {$latitude}, 経度: {$longitude}",
+            'latitude'        => $latitude,
+            'longitude'       => $longitude,
+            'prefecture_code' => $this->nearestStationService->findNearest($latitude, $longitude)['prefecture_code'] ?? '13',
+            'user_id'         => $userId,
+            'is_favorite'     => false,
         ]);
-        
-        foreach ($lines as $line) {
-            if (empty(trim($line))) continue;
-            
-            $data = str_getcsv($line);
-            if (count($data) >= 3) {
-                try {
-                    // CSV形式: Date,Time,WBGT,Tg (推定)
-                    $dateStr = $data[0] ?? '';
-                    $timeStr = $data[1] ?? '';
-                    $wbgtValue = isset($data[2]) && is_numeric($data[2]) ? (float)$data[2] : null;
-                    
-                    if ($wbgtValue !== null && $dateStr && $timeStr) {
-                        // 日時をパース
-                        $dateTime = $this->parseDateTime($dateStr, $timeStr);
-                        if ($dateTime) {
-                            WbgtData::updateOrCreate([
-                                'location_id' => $location->id,
-                                'date' => $dateTime->toDateString(),
-                                'hour' => $dateTime->hour,
-                                'data_type' => 'actual'
-                            ], [
-                                'wbgt_value' => $wbgtValue
-                            ]);
-                        }
-                    }
-                } catch (\Exception $e) {
-                    Log::warning("Failed to process CSV line: {$line} - " . $e->getMessage());
-                    continue;
-                }
+
+        $this->generateHourlyWbgtData($location);
+
+        return $location;
+    }
+
+    // =========================================================
+    // 内部処理
+    // =========================================================
+
+    /**
+     * 予測値CSV（yohou_all.csv）を取得してDBに保存する。
+     */
+    private function fetchForecastCsv(): void
+    {
+        $url = rtrim($this->forecastUrl, '/') . '/yohou_all.csv';
+        Log::info("WbgtDataService: fetching forecast CSV from {$url}");
+
+        $response = Http::timeout(30)->get($url);
+
+        if (!$response->successful()) {
+            throw new \RuntimeException("Failed to fetch forecast CSV: HTTP {$response->status()}");
+        }
+
+        $stations = $this->nearestStationService->getAllStations();
+        $successCount = 0;
+
+        foreach ($stations as $station) {
+            $records = $this->csvParser->parseForecastCsv($response->body(), $station['id']);
+            if (empty($records)) continue;
+
+            $location = $this->findOrCreateStationLocation($station);
+
+            foreach ($records as $record) {
+                WbgtData::updateOrCreate(
+                    [
+                        'location_id' => $location->id,
+                        'date'        => $record['datetime']->toDateString(),
+                        'hour'        => $record['datetime']->hour,
+                        'data_type'   => 'forecast',
+                    ],
+                    [
+                        'wbgt_value'  => $record['wbgt_value'],
+                        'data_source' => 'csv',
+                        'fetch_time'  => now(),
+                    ]
+                );
             }
+            $successCount++;
+        }
+
+        Log::info("WbgtDataService: saved forecast data for {$successCount} stations");
+    }
+
+    /**
+     * 実況値CSV（月次）を取得してDBに保存する。
+     */
+    private function fetchActualCsv(string $stationId, string $yearMonth): void
+    {
+        $url = rtrim($this->baseUrl, '/') . "/wbgt_{$stationId}_{$yearMonth}.csv";
+
+        $response = Http::timeout(30)->get($url);
+        if (!$response->successful()) {
+            Log::warning("WbgtDataService: actual CSV not available for station {$stationId} ({$response->status()})");
+            return;
+        }
+
+        $records = $this->csvParser->parseActualCsv($response->body());
+        if (empty($records)) return;
+
+        $station  = $this->nearestStationService->findById($stationId);
+        if ($station === null) return;
+
+        $location = $this->findOrCreateStationLocation($station);
+
+        foreach ($records as $record) {
+            WbgtData::updateOrCreate(
+                [
+                    'location_id' => $location->id,
+                    'date'        => $record['datetime']->toDateString(),
+                    'hour'        => $record['datetime']->hour,
+                    'data_type'   => 'actual',
+                ],
+                [
+                    'wbgt_value'  => $record['wbgt_value'],
+                    'data_source' => 'csv',
+                    'fetch_time'  => now(),
+                ]
+            );
         }
     }
-    
+
     /**
-     * 日時文字列をパース
+     * 観測地点に対応する Location を取得または作成する。
+     *
+     * @param  array{id: string, name: string, lat: float, lon: float, prefecture_code: string} $station
      */
-    private function parseDateTime(string $dateStr, string $timeStr): ?\Carbon\Carbon
+    private function findOrCreateStationLocation(array $station): Location
     {
-        try {
-            // 環境省CSV形式に応じて調整が必要
-            // 例: "2025/5/1" と "14:00" のような形式を想定
-            $dateStr = str_replace('/', '-', $dateStr);
-            $hour = (int)substr($timeStr, 0, 2);
-            
-            return \Carbon\Carbon::createFromFormat('Y-n-j H:i', $dateStr . ' ' . sprintf('%02d:00', $hour));
-        } catch (\Exception $e) {
-            Log::warning("Failed to parse date/time: {$dateStr} {$timeStr} - " . $e->getMessage());
-            return null;
-        }
+        return Location::firstOrCreate(
+            ['name' => $station['name'], 'latitude' => $station['lat'], 'longitude' => $station['lon']],
+            [
+                'address'         => $station['name'],
+                'prefecture_code' => $station['prefecture_code'],
+                'user_id'         => null,
+            ]
+        );
     }
-    
-    /**
-     * 地名から都道府県コードを取得
-     */
-    private function getPrefectureCode(string $locationName): string
-    {
-        $prefectureCodes = [
-            '札幌' => '01', '青森' => '02', '盛岡' => '03', '仙台' => '04', '秋田' => '05',
-            '山形' => '06', '福島' => '07', '水戸' => '08', '宇都宮' => '09', '前橋' => '10',
-            '熊谷' => '11', '東京' => '13', '銚子' => '12', '横浜' => '14', '新潟' => '15',
-            '富山' => '16', '金沢' => '17', '福井' => '18', '甲府' => '19', '長野' => '20',
-            '岐阜' => '21', '静岡' => '22', '名古屋' => '23', '津' => '24', '彦根' => '25',
-            '京都' => '26', '大阪' => '27', '神戸' => '28', '奈良' => '29', '和歌山' => '30',
-            '鳥取' => '31', '松江' => '32', '岡山' => '33', '広島' => '34', '下関' => '35',
-            '徳島' => '36', '高松' => '37', '松山' => '38', '高知' => '39', '福岡' => '40',
-            '佐賀' => '41', '長崎' => '42', '熊本' => '43', '大分' => '44', '宮崎' => '45',
-            '鹿児島' => '46', '那覇' => '47'
-        ];
-        
-        return $prefectureCodes[$locationName] ?? '13'; // デフォルトは東京
-    }
+
+    // =========================================================
+    // サンプルデータ生成（フォールバック / テスト用）
+    // =========================================================
 
     private function generateSampleWbgtData(): void
     {
-        // 主要都市のサンプル地点を作成
         $sampleLocations = [
-            ['name' => '東京', 'latitude' => 35.6812, 'longitude' => 139.7671, 'prefecture_code' => '13'],
-            ['name' => '横浜', 'latitude' => 35.4437, 'longitude' => 139.6380, 'prefecture_code' => '14'],
-            ['name' => '大阪', 'latitude' => 34.6937, 'longitude' => 135.5023, 'prefecture_code' => '27'],
-            ['name' => '名古屋', 'latitude' => 35.1815, 'longitude' => 136.9066, 'prefecture_code' => '23'],
-            ['name' => '福岡', 'latitude' => 33.5904, 'longitude' => 130.4017, 'prefecture_code' => '40'],
+            ['name' => '東京',  'lat' => 35.6812, 'lon' => 139.7671, 'prefecture_code' => '13'],
+            ['name' => '大阪',  'lat' => 34.6937, 'lon' => 135.5023, 'prefecture_code' => '27'],
+            ['name' => '名古屋','lat' => 35.1815, 'lon' => 136.9066, 'prefecture_code' => '23'],
+            ['name' => '福岡',  'lat' => 33.5904, 'lon' => 130.4017, 'prefecture_code' => '40'],
+            ['name' => '札幌',  'lat' => 43.0642, 'lon' => 141.3469, 'prefecture_code' => '01'],
         ];
 
-        foreach ($sampleLocations as $locationData) {
-            $location = Location::firstOrCreate([
-                'name' => $locationData['name'],
-                'latitude' => $locationData['latitude'],
-                'longitude' => $locationData['longitude']
-            ], [
-                'address' => $locationData['name'],
-                'prefecture_code' => $locationData['prefecture_code'],
-                'user_id' => null
-            ]);
-
+        foreach ($sampleLocations as $data) {
+            $location = Location::firstOrCreate(
+                ['name' => $data['name'], 'latitude' => $data['lat'], 'longitude' => $data['lon']],
+                ['address' => $data['name'], 'prefecture_code' => $data['prefecture_code'], 'user_id' => null]
+            );
             $this->generateHourlyWbgtData($location);
         }
     }
 
     private function generateHourlyWbgtData(Location $location): void
     {
-        $today = now()->startOfDay();
+        $today    = now('Asia/Tokyo')->startOfDay();
         $tomorrow = $today->copy()->addDay();
+        $nowHour  = now('Asia/Tokyo')->hour;
 
-        // 今日と明日のデータを生成
         foreach ([$today, $tomorrow] as $date) {
             for ($hour = 0; $hour < 24; $hour++) {
-                // 実況データ（今日のみ、現在時刻まで）
-                if ($date->isToday() && $hour <= now()->hour) {
-                    WbgtData::updateOrCreate([
-                        'location_id' => $location->id,
-                        'date' => $date->toDateString(),
-                        'hour' => $hour,
-                        'data_type' => 'actual'
-                    ], [
-                        'wbgt_value' => $this->generateWbgtValue($hour)
-                    ]);
-                }
+                $isToday  = $date->isToday();
+                $isPast   = $isToday && $hour <= $nowHour;
+                $isFuture = !$isToday || $hour > $nowHour;
 
-                // 予測データ
-                if ($date->isFuture() || ($date->isToday() && $hour > now()->hour)) {
-                    WbgtData::updateOrCreate([
-                        'location_id' => $location->id,
-                        'date' => $date->toDateString(),
-                        'hour' => $hour,
-                        'data_type' => 'forecast'
-                    ], [
-                        'wbgt_value' => $this->generateWbgtValue($hour, 2) // 予測は少し高めに
-                    ]);
+                if ($isPast) {
+                    WbgtData::updateOrCreate(
+                        ['location_id' => $location->id, 'date' => $date->toDateString(), 'hour' => $hour, 'data_type' => 'actual'],
+                        ['wbgt_value' => $this->sampleWbgt($hour), 'data_source' => 'sample', 'fetch_time' => now()]
+                    );
+                }
+                if ($isFuture) {
+                    WbgtData::updateOrCreate(
+                        ['location_id' => $location->id, 'date' => $date->toDateString(), 'hour' => $hour, 'data_type' => 'forecast'],
+                        ['wbgt_value' => $this->sampleWbgt($hour, 2.0), 'data_source' => 'sample', 'fetch_time' => now()]
+                    );
                 }
             }
         }
     }
 
-    private function generateWbgtValue(int $hour, float $offset = 0): float
+    private function sampleWbgt(int $hour, float $offset = 0.0): float
     {
-        // 時間帯に応じた現実的なWBGT値を生成
-        $baseValue = match(true) {
-            $hour >= 0 && $hour < 6 => 18 + $offset, // 深夜〜早朝
-            $hour >= 6 && $hour < 9 => 22 + $offset, // 朝
-            $hour >= 9 && $hour < 12 => 26 + $offset, // 午前
-            $hour >= 12 && $hour < 15 => 30 + $offset, // 昼
-            $hour >= 15 && $hour < 18 => 28 + $offset, // 午後
-            $hour >= 18 && $hour < 21 => 24 + $offset, // 夕方
-            default => 20 + $offset // 夜
+        $base = match (true) {
+            $hour < 6           => 18,
+            $hour < 9           => 22,
+            $hour < 12          => 26,
+            $hour < 15          => 30,
+            $hour < 18          => 28,
+            $hour < 21          => 24,
+            default             => 20,
         };
 
-        // ランダム要素を追加（±2度）
-        $randomOffset = (mt_rand(-200, 200) / 100);
-        
-        return round($baseValue + $randomOffset, 1);
-    }
-
-    /**
-     * WBGT観測地点情報を取得
-     */
-    private function getWbgtObservationStation(float $latitude, float $longitude): array
-    {
-        // 環境省の実測WBGT観測地点データ（47都道府県各1地点）
-        // 2025年度暑さ指数(WBGT)情報提供地点に基づく気象台観測地点
-        $wbgtStations = [
-            // 北海道・東北地方
-            ['id' => '47412', 'name' => '札幌', 'display_name' => '札幌', 'lat' => 43.064, 'lon' => 141.347],
-            ['id' => '47575', 'name' => '青森', 'display_name' => '青森', 'lat' => 40.824, 'lon' => 140.740],
-            ['id' => '47581', 'name' => '盛岡', 'display_name' => '盛岡', 'lat' => 39.704, 'lon' => 141.153],
-            ['id' => '47590', 'name' => '仙台', 'display_name' => '仙台', 'lat' => 38.268, 'lon' => 140.872],
-            ['id' => '47582', 'name' => '秋田', 'display_name' => '秋田', 'lat' => 39.719, 'lon' => 140.102],
-            ['id' => '47588', 'name' => '山形', 'display_name' => '山形', 'lat' => 38.253, 'lon' => 140.339],
-            ['id' => '47595', 'name' => '福島', 'display_name' => '福島', 'lat' => 37.750, 'lon' => 140.468],
-            
-            // 関東地方
-            ['id' => '47629', 'name' => '水戸', 'display_name' => '水戸', 'lat' => 36.342, 'lon' => 140.447],
-            ['id' => '47615', 'name' => '宇都宮', 'display_name' => '宇都宮', 'lat' => 36.566, 'lon' => 139.883],
-            ['id' => '47624', 'name' => '前橋', 'display_name' => '前橋', 'lat' => 36.391, 'lon' => 139.061],
-            ['id' => '47626', 'name' => '熊谷', 'display_name' => '熊谷', 'lat' => 36.148, 'lon' => 139.389],
-            ['id' => '47662', 'name' => '東京', 'display_name' => '東京', 'lat' => 35.681, 'lon' => 139.767],
-            ['id' => '47648', 'name' => '銚子', 'display_name' => '銚子', 'lat' => 35.735, 'lon' => 140.847],
-            ['id' => '47670', 'name' => '横浜', 'display_name' => '横浜', 'lat' => 35.444, 'lon' => 139.638],
-            
-            // 中部地方  
-            ['id' => '47604', 'name' => '新潟', 'display_name' => '新潟', 'lat' => 37.916, 'lon' => 139.036],
-            ['id' => '47607', 'name' => '富山', 'display_name' => '富山', 'lat' => 36.696, 'lon' => 137.213],
-            ['id' => '47605', 'name' => '金沢', 'display_name' => '金沢', 'lat' => 36.595, 'lon' => 136.626],
-            ['id' => '47616', 'name' => '福井', 'display_name' => '福井', 'lat' => 36.065, 'lon' => 136.222],
-            ['id' => '47638', 'name' => '甲府', 'display_name' => '甲府', 'lat' => 35.664, 'lon' => 138.569],
-            ['id' => '47610', 'name' => '長野', 'display_name' => '長野', 'lat' => 36.651, 'lon' => 138.181],
-            ['id' => '47632', 'name' => '岐阜', 'display_name' => '岐阜', 'lat' => 35.391, 'lon' => 136.722],
-            ['id' => '47656', 'name' => '静岡', 'display_name' => '静岡', 'lat' => 34.976, 'lon' => 138.383],
-            ['id' => '47636', 'name' => '名古屋', 'display_name' => '名古屋', 'lat' => 35.181, 'lon' => 136.907],
-            ['id' => '47651', 'name' => '津', 'display_name' => '津', 'lat' => 34.730, 'lon' => 136.508],
-            
-            // 関西地方
-            ['id' => '47761', 'name' => '彦根', 'display_name' => '彦根', 'lat' => 35.276, 'lon' => 136.251],
-            ['id' => '47759', 'name' => '京都', 'display_name' => '京都', 'lat' => 35.012, 'lon' => 135.768],
-            ['id' => '47772', 'name' => '大阪', 'display_name' => '大阪', 'lat' => 34.686, 'lon' => 135.520],
-            ['id' => '47770', 'name' => '神戸', 'display_name' => '神戸', 'lat' => 34.691, 'lon' => 135.183],
-            ['id' => '47780', 'name' => '奈良', 'display_name' => '奈良', 'lat' => 34.685, 'lon' => 135.805],
-            ['id' => '47777', 'name' => '和歌山', 'display_name' => '和歌山', 'lat' => 34.226, 'lon' => 135.167],
-            
-            // 中国・四国地方
-            ['id' => '47746', 'name' => '鳥取', 'display_name' => '鳥取', 'lat' => 35.504, 'lon' => 134.238],
-            ['id' => '47741', 'name' => '松江', 'display_name' => '松江', 'lat' => 35.472, 'lon' => 133.051],
-            ['id' => '47768', 'name' => '岡山', 'display_name' => '岡山', 'lat' => 34.662, 'lon' => 133.935],
-            ['id' => '47765', 'name' => '広島', 'display_name' => '広島', 'lat' => 34.397, 'lon' => 132.460],
-            ['id' => '47750', 'name' => '下関', 'display_name' => '下関', 'lat' => 33.951, 'lon' => 130.925],
-            ['id' => '47895', 'name' => '徳島', 'display_name' => '徳島', 'lat' => 34.066, 'lon' => 134.559],
-            ['id' => '47891', 'name' => '高松', 'display_name' => '高松', 'lat' => 34.340, 'lon' => 134.043],
-            ['id' => '47887', 'name' => '松山', 'display_name' => '松山', 'lat' => 33.842, 'lon' => 132.766],
-            ['id' => '47893', 'name' => '高知', 'display_name' => '高知', 'lat' => 33.560, 'lon' => 133.531],
-            
-            // 九州・沖縄地方
-            ['id' => '47807', 'name' => '福岡', 'display_name' => '福岡', 'lat' => 33.606, 'lon' => 130.418],
-            ['id' => '47813', 'name' => '佐賀', 'display_name' => '佐賀', 'lat' => 33.263, 'lon' => 130.300],
-            ['id' => '47817', 'name' => '長崎', 'display_name' => '長崎', 'lat' => 32.745, 'lon' => 129.874],
-            ['id' => '47819', 'name' => '熊本', 'display_name' => '熊本', 'lat' => 32.790, 'lon' => 130.742],
-            ['id' => '47815', 'name' => '大分', 'display_name' => '大分', 'lat' => 33.238, 'lon' => 131.613],
-            ['id' => '47830', 'name' => '宮崎', 'display_name' => '宮崎', 'lat' => 31.911, 'lon' => 131.424],
-            ['id' => '47827', 'name' => '鹿児島', 'display_name' => '鹿児島', 'lat' => 31.597, 'lon' => 130.557],
-            ['id' => '47936', 'name' => '那覇', 'display_name' => '那覇', 'lat' => 26.213, 'lon' => 127.679],
-        ];
-
-        // 最寄りのWBGT観測地点を検索
-        $nearestStation = null;
-        $minDistance = PHP_FLOAT_MAX;
-
-        foreach ($wbgtStations as $station) {
-            $distance = $this->calculateDistance(
-                $latitude, 
-                $longitude, 
-                $station['lat'], 
-                $station['lon']
-            );
-
-            if ($distance < $minDistance) {
-                $minDistance = $distance;
-                $nearestStation = [
-                    'id' => $station['id'],
-                    'name' => $station['name'],
-                    'display_name' => $station['display_name'], 
-                    'distance' => round($distance, 2)
-                ];
-            }
-        }
-
-        return $nearestStation;
-    }
-
-    /**
-     * 2点間の距離を計算（km）
-     */
-    private function calculateDistance(float $lat1, float $lon1, float $lat2, float $lon2): float
-    {
-        $earthRadius = 6371; // 地球の半径（km）
-        
-        $lat1Rad = deg2rad($lat1);
-        $lat2Rad = deg2rad($lat2);
-        $deltaLatRad = deg2rad($lat2 - $lat1);
-        $deltaLonRad = deg2rad($lon2 - $lon1);
-        
-        $a = sin($deltaLatRad / 2) * sin($deltaLatRad / 2) +
-             cos($lat1Rad) * cos($lat2Rad) *
-             sin($deltaLonRad / 2) * sin($deltaLonRad / 2);
-        
-        $c = 2 * atan2(sqrt($a), sqrt(1 - $a));
-        
-        return $earthRadius * $c;
-    }
-
-    public function getLocationWbgt(int $locationId, ?string $date = null, string $type = 'forecast'): array
-    {
-        $location = Location::findOrFail($locationId);
-        $targetDate = $date ? \Carbon\Carbon::parse($date) : now();
-
-        $wbgtData = WbgtData::where('location_id', $locationId)
-            ->where('date', $targetDate->toDateString())
-            ->where('data_type', $type)
-            ->orderBy('hour')
-            ->get();
-
-        // WBGT観測地点情報を追加
-        $wbgtStation = $this->getWbgtObservationStation($location->latitude, $location->longitude);
-
-        return [
-            'location' => $location,
-            'date' => $targetDate->toDateString(),
-            'type' => $type,
-            'wbgt_data' => $wbgtData,
-            'wbgt_station' => $wbgtStation
-        ];
-    }
-
-    public function searchLocationsByCoordinates(float $latitude, float $longitude, int $radius = 50): \Illuminate\Database\Eloquent\Collection
-    {
-        return Location::findNearby($latitude, $longitude, $radius);
-    }
-
-    public function createLocationFromCoordinates(float $latitude, float $longitude, ?int $userId = null): Location
-    {
-        // 逆ジオコーディングのモック（実際にはGoogle Maps APIを使用）
-        $mockAddress = "緯度: {$latitude}, 経度: {$longitude}";
-        $mockName = "地点_" . substr(md5($latitude . $longitude), 0, 8);
-
-        $location = Location::create([
-            'name' => $mockName,
-            'address' => $mockAddress,
-            'latitude' => $latitude,
-            'longitude' => $longitude,
-            'prefecture_code' => '13', // デモ用に東京に固定
-            'user_id' => $userId,
-            'is_favorite' => false
-        ]);
-
-        // 新しい地点のWBGTデータを生成
-        $this->generateHourlyWbgtData($location);
-
-        return $location;
+        return round($base + $offset + (mt_rand(-200, 200) / 100), 1);
     }
 }

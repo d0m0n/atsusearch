@@ -185,12 +185,13 @@ const formatDate = (dateString: string): string => {
   }
 }
 
+// DADS準拠のWBGTカラー（CLAUDE.md仕様）
 const getWbgtLevelClass = (wbgt: number): string => {
-  if (wbgt >= 31) return 'bg-red-600'      // 危険
-  if (wbgt >= 28) return 'bg-orange-500'   // 厳重警戒
-  if (wbgt >= 25) return 'bg-yellow-500'   // 警戒
-  if (wbgt >= 21) return 'bg-blue-500'     // 注意
-  return 'bg-green-500'                    // ほぼ安全
+  if (wbgt >= 31) return 'wbgt-danger'
+  if (wbgt >= 28) return 'wbgt-severe-warning'
+  if (wbgt >= 25) return 'wbgt-warning'
+  if (wbgt >= 21) return 'wbgt-caution'
+  return 'wbgt-safe'
 }
 
 // 新しい場所を履歴に追加する外部メソッド

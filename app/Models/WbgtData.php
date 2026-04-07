@@ -15,13 +15,16 @@ class WbgtData extends Model
         'date',
         'hour',
         'wbgt_value',
-        'data_type'
+        'data_type',
+        'data_source',
+        'fetch_time',
     ];
 
     protected $casts = [
         'date' => 'date',
         'hour' => 'integer',
-        'wbgt_value' => 'decimal:1'
+        'wbgt_value' => 'decimal:1',
+        'fetch_time' => 'datetime',
     ];
 
     public function location(): BelongsTo
@@ -59,12 +62,12 @@ class WbgtData extends Model
     public function getWbgtLevelColorAttribute(): string
     {
         return match($this->wbgt_level) {
-            'danger' => '#dc2626',
-            'severe_warning' => '#f97316',
-            'warning' => '#eab308',
-            'caution' => '#3b82f6',
-            'safe' => '#16a34a',
-            default => '#6b7280'
+            'danger' => '#D32F2F',
+            'severe_warning' => '#F57C00',
+            'warning' => '#FBC02D',
+            'caution' => '#0288D1',
+            'safe' => '#388E3C',
+            default => '#626264'
         };
     }
 }

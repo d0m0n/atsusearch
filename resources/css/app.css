@@ -2,18 +2,141 @@
 @tailwind components;
 @tailwind utilities;
 
-/* AtsuSearch カスタムスタイル */
-body {
-    font-family: 'Hiragino Kaku Gothic ProN', 'Hiragino Sans', Meiryo, sans-serif;
-}
+/* ==============================
+ * AtsuSearch — DADSデザインシステム準拠スタイル
+ * デジタル庁デザインシステム (DADS) https://design.digital.go.jp/dads/
+ * ============================== */
 
-#app {
+@layer base {
+  /* フォント: Noto Sans JP を優先 */
+  html {
+    font-family: "Noto Sans JP", "Hiragino Sans", "Hiragino Kaku Gothic ProN", sans-serif;
+    font-size: 16px;
+    line-height: 1.7;
+    color: #1A1A1C;
+    background-color: #FFFFFF;
+  }
+
+  body {
     min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  /* prefers-reduced-motion: すべてのアニメーションを無効化 */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
 }
 
-/* WBGT レベル用のカスタムクラス */
-.wbgt-safe { @apply bg-green-500; }
-.wbgt-caution { @apply bg-blue-500; }
-.wbgt-warning { @apply bg-yellow-500; }
-.wbgt-severe-warning { @apply bg-orange-500; }
-.wbgt-danger { @apply bg-red-600; }
+@layer components {
+  /* ==============================
+   * WBGT 危険度レベル（DADS準拠カラー）
+   * ============================== */
+  .wbgt-danger {
+    background-color: #D32F2F;
+    color: #FFFFFF;
+  }
+  .wbgt-severe-warning {
+    background-color: #F57C00;
+    color: #FFFFFF;
+  }
+  .wbgt-warning {
+    background-color: #FBC02D;
+    color: #1A1A1C;
+  }
+  .wbgt-caution {
+    background-color: #0288D1;
+    color: #FFFFFF;
+  }
+  .wbgt-safe {
+    background-color: #388E3C;
+    color: #FFFFFF;
+  }
+
+  /* テキストカラー版 */
+  .wbgt-text-danger         { color: #D32F2F; }
+  .wbgt-text-severe-warning { color: #F57C00; }
+  .wbgt-text-warning        { color: #F9A825; } /* 黄地では暗めに */
+  .wbgt-text-caution        { color: #0288D1; }
+  .wbgt-text-safe           { color: #388E3C; }
+
+  /* ==============================
+   * ページ遷移・フェードインアニメーション
+   * ============================== */
+  .page-enter {
+    animation: pageEnter 200ms ease-out forwards;
+  }
+
+  @keyframes pageEnter {
+    from {
+      opacity: 0;
+      transform: translateY(8px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  /* スタガー付きカードフェードイン */
+  .card-stagger > * {
+    opacity: 0;
+    animation: pageEnter 200ms ease-out forwards;
+  }
+  .card-stagger > *:nth-child(1) { animation-delay: 0ms; }
+  .card-stagger > *:nth-child(2) { animation-delay: 50ms; }
+  .card-stagger > *:nth-child(3) { animation-delay: 100ms; }
+  .card-stagger > *:nth-child(4) { animation-delay: 150ms; }
+  .card-stagger > *:nth-child(5) { animation-delay: 200ms; }
+  .card-stagger > *:nth-child(6) { animation-delay: 250ms; }
+
+  /* アラートバナースライドイン */
+  .alert-slide-in {
+    animation: alertSlideIn 300ms ease-out forwards;
+  }
+
+  @keyframes alertSlideIn {
+    from {
+      opacity: 0;
+      transform: translateY(-100%);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
+  /* ボタンプレスエフェクト */
+  .btn-press {
+    transition: transform 150ms ease, box-shadow 150ms ease;
+  }
+  .btn-press:active {
+    transform: scale(0.98);
+  }
+
+  /* ==============================
+   * DADSスクロールバー
+   * ============================== */
+  .dads-scrollbar::-webkit-scrollbar {
+    width: 6px;
+  }
+  .dads-scrollbar::-webkit-scrollbar-track {
+    background: #F1F1F4;
+    border-radius: 3px;
+  }
+  .dads-scrollbar::-webkit-scrollbar-thumb {
+    background: #D9D9DB;
+    border-radius: 3px;
+  }
+  .dads-scrollbar::-webkit-scrollbar-thumb:hover {
+    background: #626264;
+  }
+}

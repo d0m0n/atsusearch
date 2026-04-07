@@ -6,12 +6,6 @@ return [
     |--------------------------------------------------------------------------
     | Third Party Services
     |--------------------------------------------------------------------------
-    |
-    | This file is for storing the credentials for third party services such
-    | as Mailgun, Postmark, AWS and more. This file provides the de facto
-    | location for this type of information, allowing packages to have
-    | a conventional file to locate the various service credentials.
-    |
     */
 
     'postmark' => [
@@ -23,7 +17,7 @@ return [
     ],
 
     'ses' => [
-        'key' => env('AWS_ACCESS_KEY_ID'),
+        'key'    => env('AWS_ACCESS_KEY_ID'),
         'secret' => env('AWS_SECRET_ACCESS_KEY'),
         'region' => env('AWS_DEFAULT_REGION', 'us-east-1'),
     ],
@@ -31,18 +25,36 @@ return [
     'slack' => [
         'notifications' => [
             'bot_user_oauth_token' => env('SLACK_BOT_USER_OAUTH_TOKEN'),
-            'channel' => env('SLACK_BOT_USER_DEFAULT_CHANNEL'),
+            'channel'              => env('SLACK_BOT_USER_DEFAULT_CHANNEL'),
         ],
     ],
 
-    // AtsuSearch services
+    // =====================================================================
+    // Google Maps API
+    // GeocodingController: config('services.google_maps.key')
+    // =====================================================================
     'google_maps' => [
-        'api_key' => env('GOOGLE_MAPS_API_KEY'),
+        'key'     => env('GOOGLE_MAPS_API_KEY'),
+        'api_key' => env('GOOGLE_MAPS_API_KEY'), // 後方互換
     ],
 
+    // =====================================================================
+    // 環境省 WBGT
+    // WbgtDataService : config('services.wbgt.base_url')
+    //                   config('services.wbgt.forecast_url')
+    // AlertService    : config('services.wbgt.alert_url')
+    //
+    // .env に設定する変数:
+    //   WBGT_BASE_URL     = https://www.wbgt.env.go.jp/prev15WG/dl/
+    //   WBGT_FORECAST_URL = https://www.wbgt.env.go.jp/prev15WG/dl/
+    //   WBGT_ALERT_URL    = https://www.wbgt.env.go.jp/alert_data/
+    //   WBGT_CACHE_TTL    = 3600
+    // =====================================================================
     'wbgt' => [
-        'api_url' => env('WBGT_API_BASE_URL', 'https://www.wbgt.env.go.jp/'),
-        'cache_duration' => env('WBGT_API_CACHE_DURATION', 3600),
+        'base_url'     => env('WBGT_BASE_URL',     'https://www.wbgt.env.go.jp/prev15WG/dl/'),
+        'forecast_url' => env('WBGT_FORECAST_URL', 'https://www.wbgt.env.go.jp/prev15WG/dl/'),
+        'alert_url'    => env('WBGT_ALERT_URL',    'https://www.wbgt.env.go.jp/alert_data/'),
+        'cache_ttl'    => (int) env('WBGT_CACHE_TTL', 3600),
     ],
 
 ];

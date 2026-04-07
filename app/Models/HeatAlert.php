@@ -35,9 +35,9 @@ class HeatAlert extends Model
     public function getAlertLevelColorAttribute(): string
     {
         return match($this->alert_type) {
-            'special_warning' => '#7c2d12',
-            'warning' => '#dc2626',
-            default => '#16a34a'
+            'special_warning' => '#7F0000',
+            'warning' => '#D32F2F',
+            default => '#259D63'
         };
     }
 

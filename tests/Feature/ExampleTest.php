@@ -1,7 +1,7 @@
 <?php
 
-it('returns a successful response', function () {
+it('redirects root to search page', function () {
     $response = $this->get('/');
 
-    $response->assertStatus(200);
+    $response->assertRedirect('/search');
 });

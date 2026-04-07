@@ -21,6 +21,9 @@ class User extends Authenticatable
         'name',
         'email',
         'password',
+        'default_latitude',
+        'default_longitude',
+        'default_address',
     ];
 
     /**
@@ -41,8 +44,10 @@ class User extends Authenticatable
     protected function casts(): array
     {
         return [
-            'email_verified_at' => 'datetime',
-            'password' => 'hashed',
+            'email_verified_at'  => 'datetime',
+            'password'           => 'hashed',
+            'default_latitude'   => 'float',
+            'default_longitude'  => 'float',
         ];
     }
 }
